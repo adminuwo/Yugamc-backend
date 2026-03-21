@@ -1,0 +1,10 @@
+node_modules
+npm-debug.log
+.env
+.git
+.vscode
+Dockerfile
+.dockerignore
+uploads/
+leads.json
+rag_context.json
