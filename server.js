@@ -1,4 +1,11 @@
 const express = require('express');
+const dns = require('dns');
+try {
+  dns.setServers(['8.8.8.8', '8.8.4.4']); 
+} catch(e) { console.warn('DNS override failed, using default.'); }
+if (dns.setDefaultResultOrder) dns.setDefaultResultOrder('ipv4first');
+
+
 const nodemailer = require('nodemailer');
 const cors = require('cors');
 const { VertexAI } = require('@google-cloud/vertexai');
@@ -13,6 +20,7 @@ const mongoose = require('mongoose');
 // Connect to MongoDB
 const MONGO_URI = process.env.MONGO_URI;
 mongoose.connect(MONGO_URI)
+
   .then(() => console.log('Connected to MongoDB via Mongoose'))
   .catch(err => console.error('MongoDB connection error:', err));
 
@@ -297,11 +305,25 @@ Always follow this format strictly.
 // Contact form endpoint
 app.post('/api/contact', async (req, res) => {
   const { name, phone, email, requirement, project, message } = req.body;
+  console.log(`[POST /api/contact] Received lead from ${name} (${phone})`);
 
   if (!name || !phone || !email || !requirement) {
     return res.status(400).json({ success: false, message: 'Please fill in all required fields.' });
   }
 
+  // 1. Save to MongoDB First (Priority)
+  let leadId = null;
+  try {
+      const leadEntry = new Lead({ name, phone, email, requirement, project, message });
+      const savedLead = await leadEntry.save();
+      leadId = savedLead._id;
+      console.log(`[DB SUCCESS] Lead saved with ID: ${leadId}`);
+  } catch (dbError) {
+      console.error('[DB ERROR] Failed to save lead:', dbError);
+      // Even if DB fails, we try to send email, but we should inform the client later or log it.
+  }
+
+  // 2. Send Email Notification
   try {
     const transporter = nodemailer.createTransport({
       host: process.env.SMTP_HOST || 'smtp.gmail.com',
@@ -311,9 +333,7 @@ app.post('/api/contact', async (req, res) => {
         user: process.env.EMAIL_USER,
         pass: process.env.EMAIL_PASS,
       },
-      tls: {
-        rejectUnauthorized: false
-      }
+      tls: { rejectUnauthorized: false }
     });
 
     const mailOptions = {
@@ -329,26 +349,22 @@ app.post('/api/contact', async (req, res) => {
         <p><strong>Requirement:</strong> ${requirement}</p>
         <p><strong>Preferred Project:</strong> ${project || 'N/A'}</p>
         <p><strong>Message:</strong> ${message || 'N/A'}</p>
+        ${leadId ? `<p><small>Database ID: ${leadId}</small></p>` : ''}
       `,
     };
 
     await transporter.sendMail(mailOptions);
-    
-    // Save to MongoDB
-    try {
-        const leadEntry = new Lead({
-            name, phone, email, requirement, project, message
-        });
-        await leadEntry.save();
-        console.log('Lead saved to MongoDB:', leadEntry._id);
-    } catch (e) {
-        console.error('Error saving lead to MongoDB:', e);
-    }
+    console.log('[EMAIL SUCCESS] Lead notification sent.');
+  } catch (emailError) {
+    console.error('[EMAIL ERROR] Failed to send email:', emailError.message);
+    // Note: We don't fail the entire response if only email fails but DB succeeded.
+  }
 
-    res.status(200).json({ success: true, message: 'Message sent successfully.' });
-  } catch (error) {
-    console.error('Error sending email:', error);
-    res.status(500).json({ success: false, message: 'Failed to send message.' });
+  // Final Response (As long as it's saved in DB, we consider it a success)
+  if (leadId) {
+    res.status(200).json({ success: true, message: 'Your inquiry has been received. We will call you back.' });
+  } else {
+    res.status(500).json({ success: false, message: 'System error. Please call us directly.' });
   }
 });
 
