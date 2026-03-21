@@ -31,6 +31,7 @@ const Lead = mongoose.model('Lead', leadSchema);
 const app = express();
 app.use(express.json());
 app.use(cors());
+app.get('/', (req, res) => res.send('YUG AMC Backend is Live!'));
 
 const PORT = process.env.PORT || 5000;
 const JWT_SECRET = process.env.JWT_SECRET || 'yug_super_secret_key';
@@ -57,7 +58,7 @@ const vertexAI = new VertexAI({
 });
 
 const generativeModel = vertexAI.getGenerativeModel({
-  model: 'gemini-2.5-flash',
+  model: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
 });
 
 // Admin Auth Middleware
