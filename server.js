@@ -36,6 +36,32 @@ const leadSchema = new mongoose.Schema({
 });
 const Lead = mongoose.model('Lead', leadSchema);
 
+// Chat Lead Schema & Model
+const chatLeadSchema = new mongoose.Schema({
+  name: String,
+  email: String,
+  messages: [{ 
+    role: String, 
+    content: String, 
+    timestamp: { type: Date, default: Date.now } 
+  }],
+  timestamp: { type: Date, default: Date.now }
+});
+const ChatLead = mongoose.model('ChatLead', chatLeadSchema);
+
+// Book Visit Schema & Model
+const bookVisitSchema = new mongoose.Schema({
+  name: String,
+  phone: String,
+  email: String,
+  location: String,
+  budget: String,
+  visitDate: String,
+  timeSlot: String,
+  timestamp: { type: Date, default: Date.now }
+});
+const BookVisit = mongoose.model('BookVisit', bookVisitSchema);
+
 const app = express();
 app.use(express.json());
 app.use(cors());
@@ -81,6 +107,26 @@ const authenticateAdmin = (req, res, next) => {
     next();
   });
 };
+
+// Get Book Visit Leads (Admin Only)
+app.get('/api/admin/book-visits', authenticateAdmin, async (req, res) => {
+  try {
+    const leads = await BookVisit.find().sort({ timestamp: -1 });
+    res.json({ leads });
+  } catch (err) {
+    res.status(500).json({ message: 'Error fetching book visit leads' });
+  }
+});
+
+// Delete Book Visit Lead (Admin Only)
+app.delete('/api/admin/book-visits/:id', authenticateAdmin, async (req, res) => {
+  try {
+    await BookVisit.findByIdAndDelete(req.params.id);
+    res.json({ message: 'Book visit lead deleted successfully' });
+  } catch (err) {
+    res.status(500).json({ message: 'Error deleting lead' });
+  }
+});
 
 // Admin Login
 app.post('/api/admin/login', (req, res) => {
@@ -238,12 +284,98 @@ app.delete('/api/admin/enquiries/:id', authenticateAdmin, async (req, res) => {
     }
 });
 
+// Chat Lead Management
+app.post('/api/chat/register', async (req, res) => {
+    const { name, email } = req.body;
+    if (!name || !email) return res.status(400).json({ error: 'Name and Email are required' });
+
+    try {
+        const newLead = new ChatLead({ name, email, messages: [] });
+        await newLead.save();
+
+        // Send Email Notification to Admin
+        const transporter = nodemailer.createTransport({
+            host: process.env.SMTP_HOST || 'smtp.gmail.com',
+            port: Number(process.env.SMTP_PORT) || 587,
+            secure: Number(process.env.SMTP_PORT) === 465,
+            auth: {
+                user: process.env.EMAIL_USER,
+                pass: process.env.EMAIL_PASS,
+            },
+            tls: { rejectUnauthorized: false }
+        });
+
+        const mailOptions = {
+            from: process.env.EMAIL_USER,
+            to: 'admin@uwo24.com', // As requested
+            subject: `New User Registered - YUG AMC`,
+            html: `
+                <div style="font-family: sans-serif; padding: 20px; border: 1px solid #eee; border-radius: 10px;">
+                    <h2 style="color: #6366f1;">New User Registration</h2>
+                    <p>A new user has registered on the YUG AMC Assistant.</p>
+                    <hr/>
+                    <p><strong>Name:</strong> ${name}</p>
+                    <p><strong>Email:</strong> ${email}</p>
+                    <p><strong>Timestamp:</strong> ${new Date().toLocaleString()}</p>
+                </div>
+            `,
+        };
+
+        await transporter.sendMail(mailOptions);
+        res.json({ success: true, leadId: newLead._id });
+    } catch (error) {
+        console.error('Registration error:', error);
+        res.status(500).json({ error: 'Registration failed' });
+    }
+});
+
+app.get('/api/admin/chat-leads', authenticateAdmin, async (req, res) => {
+    try {
+        const leads = await ChatLead.find().sort({ timestamp: -1 });
+        res.json({ leads });
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to fetch chat leads' });
+    }
+});
+
+app.get('/api/admin/chat-leads/:id', authenticateAdmin, async (req, res) => {
+    try {
+        const lead = await ChatLead.findById(req.params.id);
+        if (!lead) return res.status(404).json({ error: 'Lead not found' });
+        res.json({ lead });
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to fetch chat history' });
+    }
+});
+
+app.get('/api/admin/chat-leads/export', authenticateAdmin, async (req, res) => {
+    try {
+        const leads = await ChatLead.find().sort({ timestamp: -1 });
+        let csv = 'Name,Email,Registration Time,Message Count\n';
+        leads.forEach(l => {
+            csv += `"${l.name}","${l.email}","${l.timestamp.toISOString()}","${l.messages.length}"\n`;
+        });
+        res.header('Content-Type', 'text/csv');
+        res.attachment('yug_amc_chat_leads.csv');
+        res.send(csv);
+    } catch (error) {
+        res.status(500).json({ error: 'Export failed' });
+    }
+});
+
 // Enhanced Chatbot with RAG
 app.post('/api/chat', async (req, res) => {
-  const { message, history } = req.body;
+  const { message, history, leadId } = req.body;
   if (!message) return res.status(400).json({ error: 'Message is required' });
 
   try {
+    // If leadId is provided, save user message
+    if (leadId) {
+        await ChatLead.findByIdAndUpdate(leadId, {
+            $push: { messages: { role: 'user', content: message } }
+        });
+    }
+
     // Get RAG Context
     const currentRag = JSON.parse(fs.readFileSync(RAG_FILE));
     const contextLines = Object.values(currentRag).map(f => f.content).join("\n\n---\n\n");
@@ -282,7 +414,7 @@ Always follow this format strictly.
       • <b>Yash Heights</b>: Luxury residential in South Civil Lines.
       • <b>City Plaza</b>: Upcoming commercial hub at Rampur Chowk.
       • <b>SG Square</b>: Premium commercial/lifestyle hub in Vijay Nagar.
-    - Contact: 9752326763, 8871190020. Email: yugamcteam@gmail.com.
+    - Contact: 8871190020. Email: admin@uwo24.com.
     
     Goal: Helping users find luxury properties, book site visits (free pickup/drop), and understand investment ROI.
     Always encourage users to book a site visit for direct experience.`;
@@ -295,6 +427,13 @@ Always follow this format strictly.
     const result = await chat.sendMessage(message);
     const responseText = result.response.candidates[0].content.parts[0].text;
     
+    // If leadId is provided, save model response
+    if (leadId) {
+        await ChatLead.findByIdAndUpdate(leadId, {
+            $push: { messages: { role: 'model', content: responseText } }
+        });
+    }
+
     res.json({ response: responseText });
   } catch (error) {
     console.error('Chat error:', error);
@@ -320,7 +459,6 @@ app.post('/api/contact', async (req, res) => {
       console.log(`[DB SUCCESS] Lead saved with ID: ${leadId}`);
   } catch (dbError) {
       console.error('[DB ERROR] Failed to save lead:', dbError);
-      // Even if DB fails, we try to send email, but we should inform the client later or log it.
   }
 
   // 2. Send Email Notification
@@ -357,14 +495,81 @@ app.post('/api/contact', async (req, res) => {
     console.log('[EMAIL SUCCESS] Lead notification sent.');
   } catch (emailError) {
     console.error('[EMAIL ERROR] Failed to send email:', emailError.message);
-    // Note: We don't fail the entire response if only email fails but DB succeeded.
   }
 
-  // Final Response (As long as it's saved in DB, we consider it a success)
   if (leadId) {
     res.status(200).json({ success: true, message: 'Your inquiry has been received. We will call you back.' });
   } else {
     res.status(500).json({ success: false, message: 'System error. Please call us directly.' });
+  }
+});
+
+// Book Visit endpoint
+app.post('/api/book-visit', async (req, res) => {
+  const { name, phone, email, location, budget, visitDate, timeSlot } = req.body;
+  console.log(`[POST /api/book-visit] Received booking from ${name} (${phone})`);
+
+  if (!name || !phone || !email || !visitDate) {
+    return res.status(400).json({ success: false, message: 'Required fields missing.' });
+  }
+
+  // 1. Save to MongoDB
+  let bookingId = null;
+  try {
+    const bookingEntry = new BookVisit({ name, phone, email, location, budget, visitDate, timeSlot });
+    const savedBooking = await bookingEntry.save();
+    bookingId = savedBooking._id;
+    console.log(`[DB SUCCESS] Booking saved with ID: ${bookingId}`);
+  } catch (dbError) {
+    console.error('[DB ERROR] Failed to save booking:', dbError);
+  }
+
+  // 2. Send Email Notification
+  try {
+    const transporter = nodemailer.createTransport({
+      host: process.env.SMTP_HOST || 'smtp.gmail.com',
+      port: Number(process.env.SMTP_PORT) || 587,
+      secure: Number(process.env.SMTP_PORT) === 465,
+      auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS,
+      },
+      tls: { rejectUnauthorized: false }
+    });
+
+    const mailOptions = {
+      from: process.env.EMAIL_USER,
+      to: 'admin@uwo24.com', // As requested
+      replyTo: email,
+      subject: `New Site Visit Booking: ${name}`,
+      html: `
+        <div style="font-family: sans-serif; padding: 20px; border: 1px solid #eee; border-radius: 10px;">
+          <h2 style="color: #c46a4a;">New Site Visit Booking</h2>
+          <p>A new site visit has been booked through the YUG AMC website.</p>
+          <hr/>
+          <p><strong>Name:</strong> ${name}</p>
+          <p><strong>Phone:</strong> ${phone}</p>
+          <p><strong>Email:</strong> ${email}</p>
+          <p><strong>Preferred Location:</strong> ${location || 'N/A'}</p>
+          <p><strong>Budget:</strong> ${budget || 'N/A'}</p>
+          <p><strong>Visit Date:</strong> ${visitDate}</p>
+          <p><strong>Time Slot:</strong> ${timeSlot || 'N/A'}</p>
+          <p><strong>Booking ID:</strong> ${bookingId || 'N/A'}</p>
+          <p><strong>Timestamp:</strong> ${new Date().toLocaleString()}</p>
+        </div>
+      `,
+    };
+
+    await transporter.sendMail(mailOptions);
+    console.log('[EMAIL SUCCESS] Booking notification sent to admin@uwo24.com');
+  } catch (emailError) {
+    console.error('[EMAIL ERROR] Failed to send booking email:', emailError.message);
+  }
+
+  if (bookingId) {
+    res.status(200).json({ success: true, message: 'Your site visit has been booked successfully! Our team will contact you shortly.' });
+  } else {
+    res.status(500).json({ success: false, message: 'Server error. Please try again or call us directly.' });
   }
 });
 
