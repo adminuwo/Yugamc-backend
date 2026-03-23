@@ -14,6 +14,7 @@ const path = require('path');
 const fs = require('fs');
 const jwt = require('jsonwebtoken');
 const { Storage } = require('@google-cloud/storage');
+const mammoth = require('mammoth');
 require('dotenv').config();
 const mongoose = require('mongoose');
 
@@ -147,7 +148,10 @@ const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, UPLOAD_DIR),
   filename: (req, file, cb) => cb(null, Date.now() + '-' + file.originalname)
 });
-const upload = multer({ storage });
+const upload = multer({ 
+  storage,
+  limits: { files: 1000 } // Allow up to 1000 files at once
+});
 
 // Extract text from files
 async function extractText(filePath, originalName) {
@@ -166,6 +170,14 @@ async function extractText(filePath, originalName) {
         console.error('PDF Parse Specific Error:', e);
         return "";
     }
+  } else if (extension === '.docx') {
+    try {
+        const result = await mammoth.extractRawText({ buffer: fileBuffer });
+        return result.value || "";
+    } catch (e) {
+        console.error('Docx Parse Error:', e);
+        return "";
+    }
   } else if (extension === '.txt' || extension === '.md' || extension === '.json') {
     return fileBuffer.toString('utf8');
   }
@@ -173,7 +185,7 @@ async function extractText(filePath, originalName) {
 }
 
 // Upload and Index
-app.post('/api/admin/upload', authenticateAdmin, upload.array('files'), async (req, res) => {
+app.post('/api/admin/upload', authenticateAdmin, upload.array('files', 1000), async (req, res) => {
   try {
     if (!req.files || req.files.length === 0) {
       return res.status(400).json({ error: 'No files uploaded.' });
