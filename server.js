@@ -406,6 +406,7 @@ Follow these STRICT formatting rules in every response:
 8. Maintain a clean, premium, concierge-style tone.
 9. Do NOT write long paragraphs.
 10. Ensure the response is visually structured and easy to read.
+11. Reply in the same language as user input. If the user speaks Hindi, reply in Hindi. If English, reply in English.
 
 Example format:
 
