@@ -63,6 +63,15 @@ const bookVisitSchema = new mongoose.Schema({
 });
 const BookVisit = mongoose.model('BookVisit', bookVisitSchema);
 
+// Rag File Schema
+const ragFileSchema = new mongoose.Schema({
+  name: String,
+  size: Number,
+  content: String,
+  uploadedAt: { type: Date, default: Date.now }
+});
+const RagFile = mongoose.model('RagFile', ragFileSchema);
+
 const app = express();
 app.use(express.json());
 app.use(cors());
@@ -71,13 +80,9 @@ app.get('/', (req, res) => res.send('YUG AMC Backend is Live!'));
 const PORT = process.env.PORT || 5000;
 const JWT_SECRET = process.env.JWT_SECRET || 'yug_super_secret_key';
 const UPLOAD_DIR = path.join(__dirname, 'uploads');
-const RAG_FILE = path.join(__dirname, 'rag_context.json');
-const LEADS_FILE = path.join(__dirname, 'leads.json');
 
-// Ensure directories and files exist
+// Ensure directories exist
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR);
-if (!fs.existsSync(RAG_FILE)) fs.writeFileSync(RAG_FILE, JSON.stringify({}));
-if (!fs.existsSync(LEADS_FILE)) fs.writeFileSync(LEADS_FILE, JSON.stringify([]));
 
 // Initialize Google Cloud Storage
 const storageClient = new Storage({
@@ -184,72 +189,77 @@ async function extractText(filePath, originalName) {
   return ""; 
 }
 
-// Upload and Index
+// Upload and Index (Now Persistent via MongoDB)
 app.post('/api/admin/upload', authenticateAdmin, upload.array('files', 1000), async (req, res) => {
   try {
     if (!req.files || req.files.length === 0) {
       return res.status(400).json({ error: 'No files uploaded.' });
     }
 
-    console.log(`[RAG] Uploading ${req.files.length} files...`);
-    const currentRag = JSON.parse(fs.readFileSync(RAG_FILE) || '{}');
+    console.log(`[RAG] Processing ${req.files.length} files...`);
     let indexedCount = 0;
     
     for (let file of req.files) {
       try {
-        console.log(`[RAG] Processing: ${file.originalname}`);
-        const text = await extractText(file.path, file.originalname);
+        console.log(`[RAG] Extracting: ${file.originalname}`);
+        const extractedText = await extractText(file.path, file.originalname);
         
-        if (text && text.trim().length > 0) {
-          // Upload file to Google Cloud Storage
-          console.log(`[GCS] Uploading to Bucket: ${file.originalname}`);
-          await bucket.upload(file.path, {
-              destination: file.originalname
-          });
+        if (extractedText && extractedText.trim().length > 0) {
+          // 1. Upload file object to Google Cloud Storage
+          console.log(`[GCS] Syncing to Bucket: ${file.originalname}`);
+          await bucket.upload(file.path, { destination: file.originalname });
             
-          currentRag[file.originalname] = {
-              name: file.originalname,
-              size: file.size,
-              content: text,
-              path: file.path, 
-              uploadedAt: new Date()
-          };
+          // 2. Save/Update persistent entry in MongoDB
+          await RagFile.findOneAndUpdate(
+              { name: file.originalname },
+              { 
+                name: file.originalname,
+                size: file.size,
+                content: extractedText,
+                uploadedAt: new Date()
+              },
+              { upsert: true, new: true }
+          );
+
+          // 3. Remove local temporary file
+          if (fs.existsSync(file.path)) fs.unlinkSync(file.path);
+
           indexedCount++;
-          console.log(`[RAG & GCS] Indexed successfully: ${file.originalname}`);
+          console.log(`[RAG + DB] Persisted: ${file.originalname}`);
         } else {
           console.warn(`[RAG] Skipping ${file.originalname}: No text extracted.`);
         }
       } catch (fileError) {
-        console.error(`[RAG / GCS] Error processing ${file.originalname}:`, fileError.message);
+        console.error(`[RAG / GCS / DB] Fatal Error processing ${file.originalname}:`, fileError.message);
       }
     }
     
     if (indexedCount === 0) {
-        return res.status(400).json({ error: 'Koi bhi file train nahi ho saki. Kripya PDF check karein.' });
+        return res.status(400).json({ error: 'Koi bhi file train nahi ho saki. Content check karein.' });
     }
 
-    fs.writeFileSync(RAG_FILE, JSON.stringify(currentRag, null, 2));
-    res.json({ message: `${indexedCount} files Cloud Server par upload ho gayi aur training mil gayi!` });
+    res.json({ message: `${indexedCount} files training database mein safe hain aur GCS par upload ho gayi hain!` });
   } catch (error) {
-    console.error('[RAG] Fatal Upload Error:', error);
-    res.status(500).json({ error: 'System error during indexing.', details: error.message });
+    console.error('[RAG] Internal Error:', error);
+    res.status(500).json({ error: 'Server error during indexing.', details: error.message });
   }
 });
 
-// Get Files List
-app.get('/api/admin/files', authenticateAdmin, (req, res) => {
-    const currentRag = JSON.parse(fs.readFileSync(RAG_FILE));
-    const files = Object.values(currentRag).map(f => ({ name: f.name, size: f.size, uploadedAt: f.uploadedAt }));
-    res.json({ files });
+// Get Files List (Now from MongoDB)
+app.get('/api/admin/files', authenticateAdmin, async (req, res) => {
+    try {
+        const files = await RagFile.find().sort({ uploadedAt: -1 });
+        res.json({ files });
+    } catch (e) {
+        res.status(500).json({ error: 'Database list retrieval failed.' });
+    }
 });
 
-// Delete File
+// Delete File (Persistent Delete)
 app.delete('/api/admin/files/:filename', authenticateAdmin, async (req, res) => {
     const { filename } = req.params;
-    const currentRag = JSON.parse(fs.readFileSync(RAG_FILE));
-    if (currentRag[filename]) {
-        if (fs.existsSync(currentRag[filename].path)) fs.unlinkSync(currentRag[filename].path);
-        
+    try {
+        // 1. Delete from Bucket
         try {
             await bucket.file(filename).delete();
             console.log(`[GCS] Deleted ${filename} from bucket`);
@@ -257,11 +267,16 @@ app.delete('/api/admin/files/:filename', authenticateAdmin, async (req, res) => 
             console.warn(`[GCS] Could not delete ${filename} from bucket (might not exist)`);
         }
 
-        delete currentRag[filename];
-        fs.writeFileSync(RAG_FILE, JSON.stringify(currentRag, null, 2));
-        return res.json({ message: 'File deleted' });
+        // 2. Delete from MongoDB
+        const result = await RagFile.deleteOne({ name: filename });
+        
+        if (result.deletedCount > 0) {
+            return res.json({ message: 'File and trained data deleted permanently' });
+        }
+        res.status(404).json({ error: 'File entry not found in database' });
+    } catch (dbError) {
+        res.status(500).json({ error: 'Deletion failed at database level' });
     }
-    res.status(404).json({ error: 'File not found' });
 });
 
 // Enquiries Management for Admin
@@ -388,9 +403,9 @@ app.post('/api/chat', async (req, res) => {
         });
     }
 
-    // Get RAG Context
-    const currentRag = JSON.parse(fs.readFileSync(RAG_FILE));
-    const contextLines = Object.values(currentRag).map(f => f.content).join("\n\n---\n\n");
+    // Get Dynamic RAG Context from DB (Persistence Fix)
+    const ragEntries = await RagFile.find();
+    const contextLines = ragEntries.map(f => f.content).join("\n\n---\n\n");
 
     const systemPrompt = `YOU ARE A PREMIUM AI ASSISTANT FOR YUG AMC. YOUR JOB IS TO GENERATE RESPONSES THAT FEEL ELEGANT, STRUCTURED, AND LIKE A PREMIUM CONCIERGE.
 
